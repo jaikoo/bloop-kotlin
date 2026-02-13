@@ -42,9 +42,11 @@ class BloopClient(
     private val buildNumber: String? = null,
     private val maxBufferSize: Int = 20,
     private val flushIntervalMs: Long = 5000L,
+    private val enrichDevice: Boolean = true,
 ) {
     private val buffer = CopyOnWriteArrayList<ErrorEvent>()
     private val timer = Timer("bloop-flush", true)
+    private val deviceInfo: Map<String, String> by lazy { collectDeviceInfo() }
 
     init {
         timer.schedule(object : TimerTask() {
@@ -62,6 +64,7 @@ class BloopClient(
         userIdHash: String? = null,
         metadata: Map<String, Any?>? = null,
     ) {
+        val mergedMetadata = mergeDeviceMetadata(metadata)
         val event = ErrorEvent(
             timestamp = System.currentTimeMillis(),
             source = source,
@@ -77,7 +80,7 @@ class BloopClient(
             httpStatus = httpStatus,
             requestId = requestId,
             userIdHash = userIdHash,
-            metadata = metadata,
+            metadata = mergedMetadata,
         )
         enqueue(event)
     }
@@ -94,6 +97,7 @@ class BloopClient(
         userIdHash: String? = null,
         metadata: Map<String, Any?>? = null,
     ) {
+        val mergedMetadata = mergeDeviceMetadata(metadata)
         val event = ErrorEvent(
             timestamp = System.currentTimeMillis(),
             source = source,
@@ -109,7 +113,7 @@ class BloopClient(
             httpStatus = httpStatus,
             requestId = requestId,
             userIdHash = userIdHash,
-            metadata = metadata,
+            metadata = mergedMetadata,
         )
         enqueue(event)
     }
@@ -145,6 +149,40 @@ class BloopClient(
     }
 
     // -- Private --
+
+    private fun mergeDeviceMetadata(userMetadata: Map<String, Any?>?): Map<String, Any?>? {
+        if (!enrichDevice) return userMetadata
+        if (deviceInfo.isEmpty()) return userMetadata
+
+        // Device info as base, user-provided metadata takes precedence
+        val merged = mutableMapOf<String, Any?>()
+        merged.putAll(deviceInfo)
+        userMetadata?.let { merged.putAll(it) }
+        return merged
+    }
+
+    private fun collectDeviceInfo(): Map<String, String> {
+        val info = mutableMapOf<String, String>()
+        try {
+            // Try Android Build class via reflection
+            val buildClass = Class.forName("android.os.Build")
+            buildClass.getField("MODEL").get(null)?.toString()?.let { info["device_model"] = it }
+            buildClass.getField("MANUFACTURER").get(null)?.toString()?.let { info["device_manufacturer"] = it }
+            buildClass.getField("BRAND").get(null)?.toString()?.let { info["device_brand"] = it }
+
+            val versionClass = Class.forName("android.os.Build\$VERSION")
+            versionClass.getField("RELEASE").get(null)?.toString()?.let { info["os_version"] = it }
+            versionClass.getField("SDK_INT").getInt(null).let { info["api_level"] = it.toString() }
+
+            info["os_name"] = "Android"
+        } catch (_: Exception) {
+            // Not on Android — fall back to JVM system properties
+            System.getProperty("os.name")?.let { info["os_name"] = it }
+            System.getProperty("os.version")?.let { info["os_version"] = it }
+            System.getProperty("os.arch")?.let { info["os_arch"] = it }
+        }
+        return info
+    }
 
     private fun enqueue(event: ErrorEvent) {
         buffer.add(event)
@@ -222,6 +260,7 @@ class BloopClient(
             buildNumber: String? = null,
             maxBufferSize: Int = 20,
             flushIntervalMs: Long = 5000L,
+            enrichDevice: Boolean = true,
         ) {
             shared = BloopClient(
                 endpoint = endpoint,
@@ -234,6 +273,7 @@ class BloopClient(
                 buildNumber = buildNumber,
                 maxBufferSize = maxBufferSize,
                 flushIntervalMs = flushIntervalMs,
+                enrichDevice = enrichDevice,
             )
         }
     }
