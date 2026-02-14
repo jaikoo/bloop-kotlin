@@ -19,8 +19,8 @@ kotlin {
 }
 
 tasks.test {
-    // Tests use a custom assertion harness, not JUnit
-    failOnNoMatchingTests = false
+    // Tests use a custom assertion harness, not JUnit discovery
+    enabled = false
 }
 
 publishing {
