@@ -18,6 +18,11 @@ kotlin {
     jvmToolchain(17)
 }
 
+tasks.test {
+    // Tests use a custom assertion harness, not JUnit
+    failOnNoMatchingTests = false
+}
+
 publishing {
     publications {
         create<MavenPublication>("maven") {
