@@ -45,6 +45,7 @@ class BloopClient(
     private val enrichDevice: Boolean = true,
 ) {
     private val buffer = CopyOnWriteArrayList<ErrorEvent>()
+    private val traceBuffer = CopyOnWriteArrayList<String>() // pre-serialized trace JSON
     private val timer = Timer("bloop-flush", true)
     private val deviceInfo: Map<String, String> by lazy { collectDeviceInfo() }
 
@@ -118,6 +119,23 @@ class BloopClient(
         enqueue(event)
     }
 
+    /** Start an LLM trace. Call [LLMTrace.end] when the operation completes to enqueue it for flushing. */
+    fun startTrace(
+        name: String,
+        sessionId: String? = null,
+        userId: String? = null,
+        input: String? = null,
+        metadata: Map<String, Any?>? = null,
+        promptName: String? = null,
+        promptVersion: String? = null,
+    ): LLMTrace {
+        return LLMTrace(
+            client = this, name = name, sessionId = sessionId,
+            userId = userId, input = input, metadata = metadata,
+            promptName = promptName, promptVersion = promptVersion
+        )
+    }
+
     /** Install a global uncaught exception handler that reports to bloop, then delegates to the default handler. */
     fun installUncaughtExceptionHandler() {
         val default = Thread.getDefaultUncaughtExceptionHandler()
@@ -128,24 +146,32 @@ class BloopClient(
         }
     }
 
-    /** Flush buffered events asynchronously. */
+    /** Flush buffered events and traces asynchronously. */
     fun flush() {
         val events = drainBuffer()
-        if (events.isEmpty()) return
-        Thread { sendBatch(events) }.start()
+        if (events.isNotEmpty()) Thread { sendBatch(events) }.start()
+        flushTraces()
     }
 
-    /** Flush buffered events synchronously. Use for crash handlers / shutdown. */
+    /** Flush buffered events and traces synchronously. Use for crash handlers / shutdown. */
     fun flushSync() {
         val events = drainBuffer()
-        if (events.isEmpty()) return
-        sendBatch(events)
+        if (events.isNotEmpty()) sendBatch(events)
+        flushTracesSync()
     }
 
     /** Stop the flush timer and send remaining events. Call on app shutdown. */
     fun close() {
         timer.cancel()
         flushSync()
+    }
+
+    /** Called by [LLMTrace.end] to buffer a completed trace for flushing. */
+    internal fun enqueueTrace(trace: LLMTrace) {
+        traceBuffer.add(trace.toJson())
+        if (traceBuffer.size >= maxBufferSize) {
+            flushTraces()
+        }
     }
 
     // -- Private --
@@ -222,6 +248,42 @@ class BloopClient(
             conn.disconnect()
         } catch (e: Exception) {
             logDebug("flush error: ${e.message}")
+        }
+    }
+
+    private fun flushTraces() {
+        if (traceBuffer.isEmpty()) return
+        val snapshot = traceBuffer.toList()
+        traceBuffer.clear()
+        Thread { sendTraces(snapshot) }.start()
+    }
+
+    private fun flushTracesSync() {
+        if (traceBuffer.isEmpty()) return
+        val snapshot = traceBuffer.toList()
+        traceBuffer.clear()
+        sendTraces(snapshot)
+    }
+
+    private fun sendTraces(traceJsons: List<String>) {
+        try {
+            val body = """{"traces":[${traceJsons.joinToString(",")}]}"""
+            val signature = hmacSha256(body, secret)
+            val url = URL("$endpoint/v1/traces/batch")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "POST"
+            conn.setRequestProperty("Content-Type", "application/json")
+            conn.setRequestProperty("X-Signature", signature)
+            projectKey?.let { conn.setRequestProperty("X-Project-Key", it) }
+            conn.doOutput = true
+            conn.connectTimeout = 10_000
+            conn.readTimeout = 10_000
+            OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { it.write(body) }
+            val code = conn.responseCode
+            if (code !in 200..299) logDebug("trace flush failed: HTTP $code")
+            conn.disconnect()
+        } catch (e: Exception) {
+            logDebug("trace flush error: ${e.message}")
         }
     }
 
